@@ -1,0 +1,21 @@
+# systemd unit - install on a Linux worker:
+#   sudo cp server/gpu-worker.service /etc/systemd/system/
+#   sudo nano /etc/systemd/system/gpu-worker.service   # fix paths, user and token
+#   sudo systemctl daemon-reload && sudo systemctl enable --now gpu-worker
+#   journalctl -u gpu-worker -f
+[Unit]
+Description=GPU worker daemon (distributed task offloading)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=CHANGE_ME
+WorkingDirectory=/opt/distributed-gpu-offloader
+Environment=OFFLOAD_TOKEN=CHANGE_ME_SECRET
+ExecStart=/usr/bin/python3 /opt/distributed-gpu-offloader/server/daemon.py --host 0.0.0.0 --port 5050 --engine auto
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

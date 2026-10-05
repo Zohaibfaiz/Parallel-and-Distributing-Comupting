@@ -1,0 +1,4 @@
+# Everything needed on one machine (client + benchmark). The server only needs server/requirements.txt.
+customtkinter>=5.2.0
+psutil>=5.9
+matplotlib>=3.7
