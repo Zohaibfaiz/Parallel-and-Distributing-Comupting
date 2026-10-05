@@ -184,14 +184,10 @@ rejection and bad job ids.
 
 ## Screenshots & demo
 
-Add your captures to `docs/screenshots/` (see the checklist there) and link them here:
-
-| | |
-|---|---|
-| `docs/screenshots/01_network_ping.png` | ping + `cli.py check` |
-| `docs/screenshots/03_gui_idle.png` / `04_gui_progress.png` / `05_gui_done.png` | GUI before / during / after |
-| `docs/screenshots/06_worker_gpu.png` | `nvidia-smi` on the worker while rendering |
-| `docs/demo.gif` | screen recording of a full offload |
+<img width="1600" height="900" alt="WhatsApp Image 2026-10-04 at 8 44 34 AM" src="https://github.com/user-attachments/assets/e3a03bfd-1370-476f-b2f0-736b392933d4" />
+<img width="945" height="601" alt="WhatsApp Image 2026-10-04 at 8 44 35 AM" src="https://github.com/user-attachments/assets/f6f1e3d1-b207-42c4-bc50-980ef2db02d8" />
+<img width="1600" height="916" alt="WhatsApp Image 2026-10-04 at 8 44 34 AM (2)" src="https://github.com/user-attachments/assets/19172467-1ed8-43dc-b186-71f5f9ce3558" />
+<img width="1600" height="902" alt="WhatsApp Image 2026-10-04 at 8 44 34 AM (1)" src="https://github.com/user-attachments/assets/95ba1cb4-45b1-4934-b6bc-12427ea33977" />
 
 ## License
 MIT - see [LICENSE](LICENSE).
