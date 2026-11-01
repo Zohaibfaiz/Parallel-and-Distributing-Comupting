@@ -1,0 +1,530 @@
+================================================================================
+CSC-334: PARALLEL AND DISTRIBUTED COMPUTING - LAB 04
+DETAILED CODE & ARCHITECTURE WORKING GUIDE
+(CUSTOM DISTRIBUTED TASK OFFLOADING & REMOTE GPU RENDERING SYSTEM)
+================================================================================
+Student Name    : Muhammad Ahmad Mujtaba
+Registration No : FA23-BSE-041
+Class & Section : BSE 7A (Software Engineering)
+Course          : CSC-334 Parallel and Distributed Computing
+Lab Title       : Lab 04 - Custom Distributed Task Offloading & Remote GPU Rendering
+================================================================================
+
+Yeh document Lab 04 k tamam sub-modules aur code files ki MUKAMMAL WORKING ko
+line-by-line, execution flow, socket framing, multi-threading aur terminal execution
+k sath Roman Urdu aur English technical detail mai explain karta hai.
+
+--------------------------------------------------------------------------------
+TABLE OF CONTENTS (FEHRIST)
+--------------------------------------------------------------------------------
+PART 1: SHARED PROTOCOL & UTILITIES LAYER
+  1. `common/protocol.py` (Framing, Header Format, Opcodes & recvall)
+  2. `common/utils.py` (Cryptographic Hasher, Hardware Prober & Video Gen)
+
+PART 2: SERVER WORKER DAEMON SUBSYSTEM
+  3. `server/server_daemon.py` (CLI Arguments & Server Entrypoint)
+  4. `server/network_server.py` (Multi-Threaded Listener & Session Handler)
+  5. `server/execution_engine.py` (FFmpeg NVENC GPU / CPU Engine & Telemetry)
+  6. `server/task_queue.py` (Thread-Safe Task Queue & State Machine)
+
+PART 3: CLIENT DESKTOP APPLICATION SUBSYSTEM
+  7. `client/network_client.py` (Socket Layer, Handshake, Auto-Reconnect & Streamer)
+  8. `client/client_gui.py` (CustomTkinter Desktop UI, Thread-Safe Queue & Handlers)
+
+PART 4: BENCHMARKING & VISUALIZATION ENGINE
+  9. `client/benchmark.py` (Local vs Remote Automated Test Suite)
+  10. `benchmarks/generate_benchmark_plots.py` (Matplotlib Dual-Chart Visualizer)
+
+PART 5: HOW TO RUN & VERIFICATION (TERMINAL COMMANDS & LIVE TRACES)
+  11. Step-by-Step Terminal Commands
+  12. Live Execution Trace Breakdown & Verification Proof
+
+
+================================================================================
+PART 1: SHARED PROTOCOL & UTILITIES LAYER
+================================================================================
+
+--------------------------------------------------------------------------------
+1. `common/protocol.py` (FRAMING, HEADER FORMAT & RECVALL)
+--------------------------------------------------------------------------------
+Code Highlights:
+  MAGIC_BYTES = b"DC"            # 2 Bytes Magic ("Distributed Compute")
+  HEADER_FORMAT = "!2s2sI"       # Network Byte Order: 2s (Magic), 2s (Type), I (Length)
+  HEADER_SIZE = 8                # Exact 8 bytes header length
+  CHUNK_SIZE = 64 * 1024         # 64 KB chunk size for high-speed streaming
+
+Working & Architecture:
+- TCP Stream Fragmentation ka Hal:
+  TCP data ko stream ki shakal mai bhejta hai baghair boundaries k. `HEADER_FORMAT = "!2s2sI"`
+  har packet k start mai exact 8 bytes ka fixed header lagata hai.
+  - `!`: Network Byte Order (Big-Endian) standards k mutabiq integers pack karta hai.
+  - `2s`: Magic bytes (`b"DC"`). Agar incoming packet k pehle 2 bytes "DC" na hon to
+          receiver foran reject kar deta hai (Security & Corruption Guard).
+  - `2s`: Message Type Opcode:
+      * `b"HS"` / `b"HA"`: Handshake SYN / ACK
+      * `b"PI"` / `b"PO"`: Ping Request / Pong Response
+      * `b"JS"` / `b"JA"`: Job Submit / Job Accepted
+      * `b"FC"` / `b"FE"`: File Chunk / File End-of-File (EOF)
+      * `b"PR"`          : Progress Telemetry Packet
+      * `b"DR"` / `b"DC"`: Download Request / Download Chunk
+      * `b"JR"`          : Job Final Result Packet
+  - `I`: 4-byte unsigned integer jo payload length (0 se 4 GB) specify karta hai.
+
+- `recvall(sock, num_bytes)` Function:
+  TCP sockets par `sock.recv(num_bytes)` zaroori nahi k saray bytes ek hi dafa return kare.
+  `recvall()` ek loop chalata hai:
+  ```python
+  buffer = bytearray(num_bytes)
+  view = memoryview(buffer)
+  received = 0
+  while received < num_bytes:
+      chunk = sock.recv_into(view[received:], num_bytes - received)
+      if chunk == 0:
+          raise ConnectionResetError("Connection closed unexpectedly")
+      received += chunk
+  return bytes(buffer)
+  ```
+  Yeh memoryview zero-copy slicing k sath guarantee karta hai k exact `num_bytes` receive hon.
+
+- `send_packet()` & `read_packet()`:
+  - `send_packet(sock, msg_type, payload)`: Header pack karta hai aur `sock.sendall(header + payload)`
+    k zariye network buffer mai flush karta hai.
+  - `read_packet(sock)`: Pehle `recvall(sock, 8)` call karta hai, magic aur length unpack karta
+    hai, aur phir `recvall(sock, length)` k zariye pura payload return karta hai.
+
+
+--------------------------------------------------------------------------------
+2. `common/utils.py` (CRYPTOGRAPHIC HASHER, PROBER & VIDEO GEN)
+--------------------------------------------------------------------------------
+- `compute_sha256(file_path)`:
+  File ko 64KB blocks mai read karke Cryptographic SHA-256 hash compute karta hai.
+  Memory overflow ko roknay k liye bari files (100MB+) ko bhi streaming chunk hash karta hai.
+
+- `probe_system_capabilities()`:
+  Worker node ki specs detect karta hai:
+  - `platform.system()`, `platform.machine()`, `os.cpu_count()`
+  - FFmpeg check: `subprocess.run(["ffmpeg", "-encoders"])` chala kar dekhta hai k kya
+    `h264_nvenc` encoder available hai. Agar ho to GPU hardware acceleration enable ho jati hai.
+
+- `generate_sample_video(output_path, duration_sec, resolution)`:
+  OpenCV (`cv2.VideoWriter`) ya FFmpeg synthetic test pattern (`testsrc`) k zariye dynamic
+  color bars, moving timer, aur text watermarks wali real MP4 video generate karta hai.
+
+
+================================================================================
+PART 2: SERVER WORKER DAEMON SUBSYSTEM
+================================================================================
+
+--------------------------------------------------------------------------------
+3. `server/server_daemon.py` (CLI & DAEMON ENTRYPOINT)
+--------------------------------------------------------------------------------
+- Argument Parser (`argparse`):
+  `--host` (default: `0.0.0.0`), `--port` (default: `5000`), aur `--storage` parameters accept karta hai.
+- Storage Initialization:
+  `server_storage/` folder create karta hai jahan incoming files save hongi.
+- Daemon Launch:
+  `RemoteWorkerServer` ka instance bana kar `server.start()` call karta hai aur terminal par
+  stylish banner print karta hai.
+
+
+--------------------------------------------------------------------------------
+4. `server/network_server.py` (MULTI-THREADED SESSION HANDLER)
+--------------------------------------------------------------------------------
+- Main Listener Loop (`start()`):
+  `self._server_sock.listen(10)` call karke incoming connections wait karta hai.
+  Har client aane par:
+  ```python
+  handler_thread = threading.Thread(
+      target=self._handle_client_connection,
+      args=(client_sock, client_addr),
+      daemon=True
+  )
+  handler_thread.start()
+  ```
+  Main listener thread kabhi block nahi hota; har client alag thread mai operate karta hai.
+
+- `_handle_client_connection()`:
+  - `sock.settimeout(None)`: Persistent interactive GUI sessions k liye idle timeout disable
+    rakhta hai taake client jitni der marzi parameters choose kare, connection drop na ho.
+  - Message Dispatch Loop:
+    Packet type check karta hai:
+    1. `MsgType.HANDSHAKE_SYN` -> Server specs aur capabilities ka JSON ACK return karta hai.
+    2. `MsgType.PING_REQ`      -> Timestamps match karke pong response return karta hai.
+    3. `MsgType.JOB_SUBMIT`    -> `_process_job_submission()` call karta hai.
+    4. `MsgType.DOWNLOAD_REQ`  -> Finished rendered file client ko stream karta hai.
+    5. `MsgType.CANCEL_REQ`    -> Task queue aur FFmpeg process ko kill karta hai.
+
+- `_process_job_submission()`:
+  1. Job metadata (file name, expected size, input SHA-256) read karta hai.
+  2. Client ko `JOB_ACCEPTED` bhejta hai ("READY_FOR_UPLOAD").
+  3. `FILE_CHUNK` packets loop mai receive karke disk par write karta hai aur simultaneously
+     SHA-256 hasher update karta rehta hai jab tak `FILE_EOF` na milay.
+  4. SHA-256 match karta hai. Match hone par task item bana kar `_stream_task_execution()` call karta hai.
+
+
+--------------------------------------------------------------------------------
+5. `server/execution_engine.py` (FFmpeg NVENC GPU / CPU ENGINE)
+--------------------------------------------------------------------------------
+- `execute_video_transcode()`:
+  1. Codec Selection:
+     Agar `mode == "nvenc"` ya worker par GPU available ho:
+     `codec = "h264_nvenc"`, `preset = "p4" / "p5"` (Pure Hardware NVENC).
+     Warna CPU fallback:
+     `codec = "libx264"`, `-threads {cpu_count}`.
+  2. Command Generation:
+     FFmpeg command build karta hai:
+     `ffmpeg -y -i {input_path} -c:v {codec} -b:v {bitrate} -progress pipe:1 -nostats {output_path}`
+  3. Progress Pipe Parsing:
+     FFmpeg process ko `subprocess.Popen(stdout=subprocess.PIPE)` k sath spawn karta hai.
+     `for line in process.stdout:` loop chalata hai aur stdout se `out_time_ms`, `fps`, aur `speed`
+     extract karta hai.
+  4. Real-Time Callback:
+     Har progress tick par `progress_callback(percent, fps, speed, eta, status_text)` call karta
+     hai jo network server k zariye client socket par telemetry JSON stream kar deta hai.
+
+
+--------------------------------------------------------------------------------
+6. `server/task_queue.py` (THREAD-SAFE TASK QUEUE & STATE MACHINE)
+--------------------------------------------------------------------------------
+- `TaskItem` Class:
+  Har task ka state machine maintain karti hai:
+  `PENDING` -> `RUNNING` -> `COMPLETED` / `FAILED` / `CANCELLED`
+- `TaskQueueManager`:
+  - Python `queue.Queue` aur `threading.Lock` ka istemal karta hai.
+  - `submit_task()`, `get_task()`, aur `cancel_task()` methods thread-safe mutices k zariye
+    multiple concurrent worker threads k darmiyan race conditions ko roktay hain.
+
+
+================================================================================
+PART 3: CLIENT DESKTOP APPLICATION SUBSYSTEM
+================================================================================
+
+--------------------------------------------------------------------------------
+7. `client/network_client.py` (SOCKET LAYER, AUTO-RECONNECT & STREAMER)
+--------------------------------------------------------------------------------
+- Connection Lifecycle (`connect()` / `disconnect()`):
+  Standard TCP socket initiate karta hai.
+- Auto-Reconnect Resilience:
+  Agar network glitch ya idle drop ki wajah se connection toot jaye, to `offload_video_transcode()`
+  foran transparently reconnect aur handshake call karta hai (`WinError 10053` prevention).
+- 64 KB Chunked Asset Uploader:
+  Local file ko 64KB chunks mai read karta hai aur socket par stream karta hai:
+  ```python
+  with open(input_file, "rb") as f:
+      while chunk := f.read(CHUNK_SIZE):
+          send_packet(self.sock, MsgType.FILE_CHUNK, chunk)
+          sent_bytes += len(chunk)
+  send_packet(self.sock, MsgType.FILE_EOF, input_sha256.encode("utf-8"))
+  ```
+- Chunked Output Downloader:
+  Render complete hone par server se rendered MP4 ko chunk-by-chunk download karta hai,
+  `client_downloads/` directory mai save karta hai, aur local SHA-256 verify karta hai.
+
+
+--------------------------------------------------------------------------------
+8. `client/client_gui.py` (CUSTOMTKINTER DESKTOP UI & THREAD-SAFE QUEUE)
+--------------------------------------------------------------------------------
+- UI Layout:
+  Modern CustomTkinter dark-mode grid:
+  - Header: Course banner, system metadata, registration number (`FA23-BSE-041`).
+  - Left Column: Network IP/Port fields, Handshake button, Worker status card,
+    Workload selector (Video / CUDA), Browse file, "Gen Asset" button, Resolution/Bitrate/Preset combos.
+  - Right Column: Progress bar, Live FPS, Speed multiplier, Turnaround timer, SHA-256 badge.
+  - Bottom: Integrated Real-Time Log Console with "Clear Log" button.
+
+- Thread-Safe UI Updates (`_poll_ui_queue`):
+  GUI thread kabhi block nahi hota. Network operations background daemon thread mai chaltay hain:
+  ```python
+  def run_on_ui(self, fn, *args, **kwargs):
+      self.ui_queue.put((fn, args, kwargs))
+  ```
+  Tkinter mainloop har 40ms baad queue poll karta hai aur UI labels update karta hai.
+
+
+================================================================================
+PART 4: BENCHMARKING & VISUALIZATION ENGINE
+================================================================================
+
+--------------------------------------------------------------------------------
+9. `client/benchmark.py` (AUTOMATED BENCHMARK SUITE)
+--------------------------------------------------------------------------------
+- Test Matrix:
+  480p (Fast test), 720p (Standard HD), aur 1080p (Full HD) videos generate karta hai.
+- Dual Execution:
+  1. Local Benchmark : Client machine par direct FFmpeg render run karta hai ($T_{local}$).
+  2. Remote Benchmark: Remote worker node par task offload karta hai ($T_{remote}$).
+- Metric Computations:
+  - Speedup: $S = T_{local} / T_{remote}$
+  - Network Overhead: $\eta = (T_{upload} + T_{download}) / T_{turnaround} \times 100\%$
+  - Results ko `benchmarks/benchmark_data.json` mai save karta hai.
+
+
+--------------------------------------------------------------------------------
+10. `benchmarks/generate_benchmark_plots.py` (MATPLOTLIB VISUALIZER)
+--------------------------------------------------------------------------------
+- Plot 1 (`benchmark_execution_time.png`):
+  Grouped bar chart showing Local Execution Time vs Remote Turnaround Time across all resolutions.
+- Plot 2 (`benchmark_speedup_overhead.png`):
+  Dual-axis chart showing Speedup Factor curve ($S$) alongside Network Overhead percentage ($\eta$).
+
+
+================================================================================
+PART 5: HOW TO RUN & VERIFICATION (TERMINAL COMMANDS & LIVE TRACES)
+================================================================================
+
+--------------------------------------------------------------------------------
+11. STEP-BY-STEP TERMINAL COMMANDS
+--------------------------------------------------------------------------------
+Step 1: Start Server Daemon (Terminal 1)
+  cd d:\github2\Parallel-and-Distributed-Computing
+  python -u lab4/server/server_daemon.py --host 127.0.0.1 --port 5000
+  (Ya direct `lab4/run_server.bat` par double-click karein)
+
+Step 2: Launch Client Desktop GUI (Terminal 2)
+  cd d:\github2\Parallel-and-Distributed-Computing
+  python lab4/client/client_gui.py
+  (Ya direct `lab4/run_client.bat` par double-click karein)
+
+Step 3: Run Interactive GUI Flow
+  1. "⚡ Handshake & Ping" par click karein -> Green `Worker: ONLINE` show hoga.
+  2. "🎬 Gen Asset" par click karein -> Test sample video auto-create hogi.
+  3. "🚀 Offload Task to Remote Worker" par click karein -> Real-time progress chalaygi.
+  4. Task complete hone par green "SHA-256: VERIFIED ✔" badge show hoga.
+
+
+--------------------------------------------------------------------------------
+12. LIVE EXECUTION TRACE BREAKDOWN & VERIFICATION PROOF
+--------------------------------------------------------------------------------
+Client Console Log Trace:
+  [16:02:00] [HANDSHAKE] Contacting Remote Worker at 127.0.0.1:5000...
+  [16:02:00] [HANDSHAKE SUCCESS] Protocol v2.0.0 confirmed.
+  [16:02:00] [NET LATENCY] Measured Round-Trip Time (RTT): 0.28 ms
+  [16:02:01] [ASSET] Selected: test_render_sample.mp4 (3.5 MB)
+  [16:02:01] [OFFLOAD] Initiating video transcode offload: {'resolution': '1280x720', 'bitrate': '3000k', 'preset': 'fast', 'mode': 'auto'}
+  [16:02:01]   [STREAM] Uploading asset (3.5 MB) @ 562.00 MB/s
+  [16:02:03]   [STREAM] Rendering with Multi-Threaded CPU (libx264) [25.0%] (FPS: 28.7, Speed: 0.95x)
+  [16:02:07]   [STREAM] Rendering with Multi-Threaded CPU (libx264) [71.1%] (FPS: 28.7, Speed: 0.95x)
+  [16:02:10]   [STREAM] Downloading rendered asset from worker node...
+  [16:02:10] [VERIFIED] SHA-256 Checksum: b26ae302fd84... matched perfectly!
+  [16:02:10] [OFFLOAD METRICS]
+             - Remote Engine   : Multi-Threaded CPU (libx264)
+             - Upload Duration : 0.007s
+             - Remote Compute  : 9.559s
+             - Download Duration: 0.052s
+             - Network Overhead: 0.059s
+             - Total Turnaround: 9.619s
+             - Saved Result To : lab4\client\client_downloads\out_task_ce56933c.mp4
+
+Server Terminal Trace:
+  ======================================================================
+    REMOTE GPU EXECUTION ENGINE DAEMON (CSC-334)
+  ======================================================================
+  [*] Bound to Address       : 127.0.0.1:5000
+  [*] Storage Directory      : lab4\server\server_storage
+  [*] Node Hostname          : DESKTOP-QI6H2EA
+  [*] Platform OS            : Windows 10 (AMD64)
+  [*] CPU Cores              : 4
+  [*] GPU/NVENC Acceleration : NVIDIA NVENC Supported (Fallback to CPU Multi-Thread on non-GPU hosts)
+  [*] Protocol Version       : 2.0.0
+  ======================================================================
+  [*] Worker daemon listening for incoming client offload tasks...
+  [+] Incoming connection from client: 127.0.0.1:63429
+    [HANDSHAKE] Client 127.0.0.1 connected with Client ID: client_aebb59d2
+  [JOB SUBMIT] Task ID: task_696b6b06 (video_transcode) from 127.0.0.1
+    Asset File: test_render_sample.mp4 (3.5 MB)
+    Upload Complete. Computed SHA-256: 9f3926df46a0...
+    [INTEGRITY] SHA-256 checksum verified successfully!
+  [JOB COMPLETE] Task task_696b6b06 completed in 3.87s using Multi-Threaded CPU (libx264)
+  [DOWNLOAD] Streaming out_task_696b6b06.mp4 (1.7 MB) to client...
+  [DOWNLOAD COMPLETE] Successfully streamed out_task_696b6b06.mp4 with SHA-256 verification.
+  [-] Client 127.0.0.1:63429 disconnected.
+
+Evidence & Media Files Saved:
+  - Video Demonstration: `lab4/ss/demo.mp4`
+  - Animated GIF Preview: `lab4/ss/demo.gif`
+  - Initial Window: `lab4/ss/client_gui_initial.PNG`
+  - Handshake & Ping: `lab4/ss/client_gui_handshake.PNG`
+  - Progress Streaming: `lab4/ss/client_gui_progress.PNG`
+  - Verified Completion: `lab4/ss/client_gui_completed.PNG`
+  - Server Terminal Log: `lab4/ss/server_terminal_execution.PNG`
+
+100% Verified, Fully Working, and Formally Documented!
+================================================================================
+
+
+================================================================================
+PART 6: 2 COMPUTERS LAN SETUP (WITHOUT INTERNET) & COMPLEX PROJECT TASK OFFLOADING
+================================================================================
+
+1. DO COMPUTERS KA APAS MAI DIRECT LAN WIRE SE CONNECTION (BINA INTERNET):
+--------------------------------------------------------------------------------
+Agar aap k paas koi WiFi router ya internet mojood nahi hai, to aap Computer A aur
+Computer B ko 1 standard Ethernet (RJ-45) LAN cable k zariye direct connect kar sakte hain:
+
+Step 1: Dono computers k Ethernet ports mai LAN cable connect karein.
+Step 2: Dono computers par Static IP address set karein (Subnet Mask: 255.255.255.0):
+        - Computer B (Server Node): IP = 192.168.1.20, Subnet = 255.255.255.0
+        - Computer A (Client Node): IP = 192.168.1.10, Subnet = 255.255.255.0
+        (Windows Network Settings -> Ethernet Adapter -> IPv4 Properties -> Use the following IP address)
+
+Step 3: Server GUI ya Daemon Computer B par open karein:
+        - `run_server.bat` ya `run_server_gui.bat` double click karein.
+        - Server Dashboard automatically detect kar k screen par apna LAN IP dikha dega:
+          "📌 Computer A Connect IP: 192.168.1.20"
+        - "📋 Copy IP" button se IP copy kiya ja sakta hai.
+        - Server "🚀 Start Server" click kar k listening mode mai chala jata hai.
+
+Step 4: Client GUI Computer A par open karein:
+        - `run_client.bat` double click karein.
+        - "Worker IP" field mai Computer B ka IP enter karein: `192.168.1.20`
+        - "⚡ Handshake & Ping" button click karein!
+
+
+2. CONNECTION ESTABLISH HONE PAR MESSAGES (SERVER & CLIENT FEEDBACK):
+--------------------------------------------------------------------------------
+Jab Client (Computer A) Server (Computer B) se connect hota hai:
+
+A. Server GUI & Console par Live Feedback:
+   - Status Badge change hota hai: `🟢 SERVER LISTENING`
+   - Active Clients Counter: `1 Active Client`
+   - Connected Clients Box mai Computer A ka Record show hota hai:
+     [1] Client ID: client_8325d85e | IP: 192.168.1.10:55523 | Status: AUTHENTICATED
+   - Server Console Log mai prominent message:
+     [+] [CLIENT CONNECTED] Incoming connection from: 192.168.1.10:55523
+     [+] [HANDSHAKE ESTABLISHED] Client Computer 'client_8325d85e' (192.168.1.10) verified protocol v2.0.0!
+         Node ready to receive complex project offload tasks & file shares from 192.168.1.10
+
+B. Client GUI & Console par Live Feedback:
+   - Top Indicator: `🟢 ONLINE (DESKTOP-B)`
+   - Server Status Card: `🟢 Connected to: DESKTOP-B (192.168.1.20)`
+   - Specifications Card: `CPU: 8 Cores | GPU: NVIDIA NVENC Active | Ping RTT: 0.28 ms`
+   - Prominent Popup Notification Display:
+     "🎉 Successfully Connected to Server (Computer B)!
+      • Node Hostname : DESKTOP-B
+      • Bound Address : 192.168.1.20:5000
+      • CPU Hardware  : 8 Processing Cores
+      • Acceleration  : NVIDIA NVENC Active
+      • Ping Latency  : 0.28 ms (Fast LAN Wire)
+      Remote resources are active! You can now offload complex project tasks."
+   - Client Console Log:
+     [TCP CONNECTED] Socket established with 192.168.1.20:5000!
+     [HANDSHAKE VERIFIED] Server 'DESKTOP-B' running protocol v2.0.0
+     [LATENCY PROBE] Measured Round-Trip Time (RTT): 0.28 ms
+     [RESOURCES UNLOCKED] 8 CPU Cores | NVIDIA NVENC Active
+
+
+3. COMPLEX PROJECT TASKS KO DISTRIBUTE KARNA (SERVER RESOURCES KO USE KARNA):
+--------------------------------------------------------------------------------
+Complex projects mai different computational tasks hote hain jo client par chalana
+bhari hota hai. System 3 broad modes support karta hai:
+
+Mode 1: "Complex Project Python Script / Heavy Workload"
+  - Purpose: Aap kisi bhi complex project ka heavy Python code (Data Processing,
+    Monte Carlo Simulation, Matrix/Tensor computation, Prime factorization, Machine Learning)
+    Computer B (Server) par bhej kar us k CPU/GPU se execute karwa sakte hain.
+  - Usage:
+    1. Task Mode dropdown se select karein: `Complex Project Python Script / Heavy Workload`
+    2. Apna project script select karein ya `✨ Gen Script` click karein (jo multi-stage
+       Monte Carlo, Matrix linear algebra, aur Prime search ka heavy workload script generate karta hai).
+    3. `🚀 Offload Task to Remote Worker (Computer B)` click karein.
+    4. Client script ko upload karta hai, Server apna worker process spawn karta hai,
+       aur real-time terminal stdout client k live log console par stream hota hai!
+    5. Output JSON artifact automatically Client k `client_downloads/` folder mai save ho jata hai.
+
+Mode 2: "Video Transcoding (FFmpeg NVENC / GPU)"
+  - Purpose: Heavy 4K/1080p video rendering aur transcoding Server k NVIDIA GPU NVENC
+    hardware encoder par execute karwana.
+
+Mode 3: "CUDA / Matrix Parallel Compute"
+  - Purpose: PyTorch CUDA / NumPy parallel matrix multiplication and tensor traces.
+
+
+4. PEER-TO-PEER LAN FILE SHARING HUB (BINA INTERNET FILE TRANSFER):
+--------------------------------------------------------------------------------
+Computer A aur Computer B k darmiyan bina internet k direct files share karne k liye
+Client GUI mai dedicated tab banaya gaya hai:
+
+- Tab: `📁 LAN File Sharing Hub`
+  1. `📤 Upload File to Server`: Computer A se koi bhi file select kar k Server k shared
+     storage mai direct send karein (SHA-256 integrity auto-verified).
+  2. `🔄 Refresh Server Files`: Server par mojood tamam shared files ki list dekhein
+     (File Name, File Size, Date Modified).
+  3. `📥 Download from Server`: Server se kisi bhi file ka naam likh kar 1-click se
+     apne Client computer par download karein.
+  4. `📂 Open Downloads Folder`: Downloaded files ko Windows Explorer mai foran open karein.
+
+Is tarah Computer A aur Computer B aik complete high-performance distributed cluster
+ban jate hain jo tasks distribute karta hai, remote resources utilize karta hai,
+aur continuous file sharing provide karta hai!
+
+================================================================================
+PART 6: ALL-IN-ONE UNIFIED FILE (`lab4/app.py` / `lab4/main.py`)
+(CLIENT & SERVER IN 1 FILE + BUILT-IN DISTRIBUTED VIDEO EDITOR TOOL)
+================================================================================
+
+1. YEH SINGLE-FILE ARCHITECTURE KIYA HAI?
+- Problem: Pehle alag alag folders mai `client_gui.py`, `server_gui.py`, `network_server.py`,
+  aur `network_client.py` the. Jab do computers par code le kar jana hota tha to relative
+  imports aur directory paths ki wajah se confusion hoti thi.
+- Solution: `lab4/app.py` aik MUKAMMAL, 100% SELF-CONTAINED single file hai jis k andar:
+    a) Protocol Framing (`MAGIC_BYTES = b"DC"`, 8-byte header, `recvall`)
+    b) Server Daemon (`DistributedRenderServer` with multi-threaded listener)
+    c) Client Communicator (`DistributedRenderClient` with chunk streamer)
+    d) Remote Render Engine (FFmpeg NVENC GPU / CPU multi-threading)
+    e) OpenCV Frame Previewer & Synthetic Video Generator
+    f) Complete Modern Dark-Mode CustomTkinter GUI for BOTH Client & Server!
+
+2. HOW TO RUN:
+   - Server machine (Computer B) par:
+     `python lab4/app.py --server`
+     (Ya double-click `run_server.bat`)
+     -> Server GUI open ho jati hai, apne LAN IPs show karti hai, aur Port 5000 par listen karti hai.
+
+   - Client machine (Computer A) par:
+     `python lab4/app.py --client`
+     (Ya double-click `run_client.bat`)
+     -> Client Video Editor open ho jata hai.
+
+   - Interactive Selector (Dono aik sath / switchable):
+     `python lab4/app.py`
+     (Ya double-click `run_app.bat`)
+     -> Tabs k zariye user kisi bhi waqt Client Video Editor ya Server Node k darmiyan switch kar sakta hai!
+
+3. DISTRIBUTED VIDEO EDITOR TOOL KI WORKING (VIDEO IDR HO, RENDER SERVER SIDE HO):
+   Step 1: Local Video Load Karna:
+           - User 'Browse...' se koi bhi `.mp4`, `.avi`, `.mov`, `.mkv` select karta hai,
+             ya '✨ Gen Test Video' click karke HD synthetic animated video generate karta hai.
+           - OpenCV foran video ki properties (Duration, Dimensions, FPS, File Size) probe karta
+             hai aur LIVE THUMBNAIL FRAME PREVIEW screen par show karta hai!
+
+   Step 2: Video Editing Tool Controls:
+           - ✂️ Trim Range   : Start Time (s) aur End Time (s) select karein.
+           - 🎨 Creative FX  : Grayscale, Sepia, Negate, Blur, Vignette, Mirror, Contrast.
+           - ⏩ Speed        : 0.5x (Slow-Mo), 1.0x, 1.5x, 2.0x, 4.0x (audio automatically pitch-aligned).
+           - 📐 Resolution   : Original, 1080p, 720p, 480p, 1:1 Square (Instagram), 9:16 (TikTok/Shorts).
+           - 🏷️ Watermark    : Custom Text (e.g. 'FA23-BSE-041') with semi-transparent badge overlay.
+           - 🔊 Audio        : Keep Audio ya Mute Audio.
+           - ⚡ Acceleration : Auto (NVENC GPU detect), Force NVENC, ya CPU Multi-threading.
+
+   Step 3: Server Par Offload & Render:
+           - Client video ka SHA-256 hash nikalta hai aur Server ko packet bhejta hai.
+           - Video 64 KB chunks mai Server ko stream hoti hai.
+           - Server video ko reassemble karta hai, checksum verify karta hai, aur FFmpeg
+             render pipeline execute karta hai.
+
+   Step 4: Live Progress & Streaming Logs:
+           - Server render pipeline se `-progress pipe:1` k zariye FPS, Speed, %, aur ETA nikalta hai.
+           - Telemetry packets Client ko real-time bhejta hai.
+           - Client screen par progress bar (0% - 100%) aur LIVE LOG TERMINAL par har event
+             timestamp k sath print hota hai!
+
+   Step 5: Output Download & Local Save:
+           - Render hone k baad Server finished video ko Client ko wapis stream karta hai.
+           - Client SHA-256 hash verify karta hai (zero packet corruption).
+           - Video automatically `client_downloads/` folder mai save ho jati hai.
+           - '▶️ Play Video' button active ho jata hai jo video player mai file chala deta hai,
+             aur '📂 Open Output Folder' se folder open ho jata hai!
+
+================================================================================
+
+

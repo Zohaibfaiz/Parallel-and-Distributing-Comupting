@@ -1,0 +1,8 @@
+# Requirements for CSC-334 Lab 4: Custom Distributed Task Offloading & Remote GPU Rendering System
+customtkinter>=6.0.0
+darkdetect>=0.8.0
+pillow>=10.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+opencv-python>=4.8.0
+imageio-ffmpeg>=0.4.9
