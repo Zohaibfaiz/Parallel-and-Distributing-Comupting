@@ -1,3 +1,25 @@
+## 🎥 Project Demo
+
+[▶ Watch Project Demo](https://drive.google.com/file/d/1r96qENUyvaMAjaJI5WQORiTri0OwjlI4/view?usp=drivesdk)
+
+---
+
+## 📸 Project Screenshots
+
+### Screenshot 1
+![Project Screenshot 1](https://github.com/user-attachments/assets/0e3f0a02-42c4-4ba2-83b9-868aa256d85c)
+
+### Screenshot 2
+![Project Screenshot 2](https://github.com/user-attachments/assets/3e4ad42e-4adc-4ba3-8ae5-d74b86521280)
+
+### Screenshot 3
+![Project Screenshot 3](https://github.com/user-attachments/assets/9cb13121-1809-4d32-b5bb-20d1a663aad2)
+
+
+
+
+
+
 # Mid Term — Custom Distributed Task Offloading & Remote GPU Rendering
 
 **Course:** CSC-334 Parallel and Distributed Computing
